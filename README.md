@@ -47,7 +47,7 @@ pip install virtualizarr icechunk xarray zarr obstore obspec-utils
 
 ## Getting Started
 
-1. **Start with skill.md** for comprehensive operational instructions and common workflows
+1. **Start with SKILL.md** for comprehensive operational instructions and common workflows
 2. **See examples.md** for complete runnable code examples covering:
    - Local file virtualization
    - Public S3 datasets (anonymous access)

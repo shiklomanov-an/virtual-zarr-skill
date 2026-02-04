@@ -1,3 +1,8 @@
+---
+name: "virtual-zarr"
+description: "Create and work with virtual Zarr stores for enabling fast Zarr access to legacy file formats"
+license: UNLICENSE
+---
 # Virtual Zarr Agent Skill
 
 AI agent skill for creating and working with virtual Zarr stores using VirtualiZarr and icechunk.
