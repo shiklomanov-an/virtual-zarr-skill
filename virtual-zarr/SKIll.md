@@ -78,7 +78,7 @@ Parsers convert file formats to virtual Zarr representations. Available parsers:
 - `NetCDF3Parser`: NetCDF3 files
 - `FITSParser`: FITS astronomical data
 - `DMRPPParser`: DMR++ sidecar files
-- `ZarrParser`: Existing Zarr stores
+- `ZarrParser`: Existing Zarr stores (orders of magnitude faster than alternatives for large stores)
 - `KerchunkJSONParser` / `KerchunkParquetParser`: Existing kerchunk references
 
 ### Homogeneity Requirements
@@ -122,8 +122,14 @@ vds = vz.open_virtual_dataset(
 storage = icechunk.local_filesystem_storage("/tmp/my-repo")
 repo = icechunk.Repository.create(storage)
 
-with repo.transaction("main", message="Initial virtualization") as store:
-    vds.vz.to_icechunk(store)
+# Recommended: explicit session pattern
+session = repo.writable_session("main")
+vds.vz.to_icechunk(session.store)
+session.commit("Initial virtualization")
+
+# Alternative: context manager (also valid)
+# with repo.transaction("main", message="Initial virtualization") as store:
+#     vds.vz.to_icechunk(store)
 ```
 
 ## Common Workflows
@@ -176,8 +182,9 @@ credentials = icechunk.containers_credentials({
 
 # Create repository and write
 repo = icechunk.Repository.create(storage, config, credentials)
-with repo.transaction("main", message="Add temperature data") as store:
-    vds.vz.to_icechunk(store)
+session = repo.writable_session("main")
+vds.vz.to_icechunk(session.store)
+session.commit("Add temperature data")
 ```
 
 ### Workflow 2: Multi-File Virtualization
@@ -232,8 +239,9 @@ combined = xr.concat(
 )
 
 # Write combined dataset
-with repo.transaction("main", message="Aggregated daily data") as store:
-    combined.vz.to_icechunk(store)
+session = repo.writable_session("main")
+combined.vz.to_icechunk(session.store)
+session.commit("Aggregated daily data")
 ```
 
 ### Workflow 3: Icechunk Version Control
@@ -296,8 +304,9 @@ storage = icechunk.local_filesystem_storage("/data/timeseries-repo")
 repo = icechunk.Repository.create(storage)
 
 # Write initial data
-with repo.transaction("main", message="January data") as store:
-    vds1.vz.to_icechunk(store)
+session = repo.writable_session("main")
+vds1.vz.to_icechunk(session.store)
+session.commit("January data")
 
 # Append February data
 vds2 = vz.open_virtual_dataset(
@@ -306,8 +315,9 @@ vds2 = vz.open_virtual_dataset(
     parser=parser
 )
 
-with repo.transaction("main", message="Added February") as store:
-    vds2.vz.to_icechunk(store, append_dim="time")
+session = repo.writable_session("main")
+vds2.vz.to_icechunk(session.store, append_dim="time")
+session.commit("Added February")
 
 # Continue appending more months...
 ```
@@ -330,7 +340,7 @@ from virtualizarr.manifests.store import ManifestStore
 
 parser = HDFParser()
 manifest_store = parser(url, registry)
-ds = xr.open_zarr(manifest_store, consolidated=False, zarr_format=3)
+ds = xr.open_zarr(manifest_store, zarr_format=3)  # consolidated=False no longer needed
 
 # Method 3: Load specific chunks using Zarr directly
 session = repo.readonly_session("main")
@@ -594,6 +604,85 @@ with h5py.File("file.nc", "r") as f:
 
 See [troubleshooting.md](troubleshooting.md) for detailed error diagnosis and solutions.
 
+## New Features (VirtualiZarr 2.x / Icechunk 2.x)
+
+### Region Writes (VirtualiZarr 2.5+)
+
+Write virtual data to a specific region of an existing array:
+
+```python
+# Write to a specific time region
+session = repo.writable_session("main")
+vds.vz.to_icechunk(session.store, region={"time": slice(0, 365)})
+session.commit("Write year 2024 region")
+```
+
+### Sharding Support (VirtualiZarr 2.5+)
+
+VirtualiZarr now supports sharded Zarr arrays, enabling efficient access to large datasets with many small chunks.
+
+### Datatree Support
+
+Open hierarchical datasets (e.g., multi-group HDF5/NetCDF) as a DataTree:
+
+```python
+import virtualizarr as vz
+
+datatree = vz.open_virtual_datatree(url, registry=registry, parser=HDFParser())
+# Access groups as tree nodes
+```
+
+### ZarrParser Performance
+
+When virtualizing existing Zarr stores, `ZarrParser` uses async listing for dramatically faster performance on large stores:
+
+```python
+from virtualizarr.parsers import ZarrParser
+
+vds = vz.open_virtual_dataset(zarr_url, registry=registry, parser=ZarrParser())
+```
+
+### Icechunk In-Memory Storage
+
+For testing and development, create ephemeral repositories:
+
+```python
+import icechunk
+
+storage = icechunk.in_memory_storage()
+repo = icechunk.Repository.create(storage)
+```
+
+### Icechunk ForkSession (Distributed Writes)
+
+Icechunk 2.0 redesigned ForkSession for parallel/distributed writes. Use `session.fork()` to create a picklable ForkSession:
+
+```python
+import icechunk
+
+session = repo.writable_session("main")
+
+# Create fork sessions for parallel workers
+fork1 = session.fork()
+fork2 = session.fork()
+
+# (in separate processes/workers, pass fork objects)
+# Each worker writes independently:
+import zarr
+store1 = fork1.store
+zarr.open_group(store1, mode="r+")["chunk_0"][:] = data_chunk_0
+
+store2 = fork2.store
+zarr.open_group(store2, mode="r+")["chunk_1"][:] = data_chunk_1
+
+# Merge completed forks back into the main session
+session.merge(fork1)
+session.merge(fork2)
+session.commit("Parallel write complete")
+```
+
+Note: ForkSessions are based on anonymous snapshots - no need to commit before forking.
+
 ## Best Practices
 
 ### Performance Optimization
@@ -681,7 +770,7 @@ See [troubleshooting.md](troubleshooting.md) for detailed help with:
 - `open_virtual_datatree(url, registry, parser, ...)` → Hierarchical data
 
 **Xarray Accessors**:
-- `ds.vz.to_icechunk(store, append_dim=None)` → Write to icechunk
+- `ds.vz.to_icechunk(store, append_dim=None, region=None)` → Write to icechunk
 - `ds.vz.to_kerchunk(filepath, format='json')` → Write kerchunk refs
 - `ds.vz.rename_paths(new)` → Update file paths
 - `ds.vz.nbytes` → Virtual reference size
@@ -690,9 +779,12 @@ See [troubleshooting.md](troubleshooting.md) for detailed help with:
 - `Repository.create(storage)` / `.open(storage)` → Repo management
 - `repo.writable_session(branch)` → Create writable session
 - `repo.readonly_session(branch/tag/snapshot_id)` → Read-only access
-- `repo.transaction(branch, message)` → Context manager for commits
-- `session.commit(message)` → Create snapshot
+- `repo.transaction(branch, message)` → Context manager for commits (alternative to session)
+- `session.commit(message, allow_empty=False)` → Create snapshot
 - `repo.create_branch(name, snapshot_id)` / `.create_tag(name, snapshot_id)`
+- `icechunk.local_filesystem_storage(path)` / `icechunk.s3_storage(...)` → Storage backends
+- `icechunk.in_memory_storage()` → Ephemeral in-memory storage (testing/dev)
+- `upgrade_icechunk_repository(repo, dry_run=False)` → Migrate v1 repos to v2 format
 
 ### External Documentation
 

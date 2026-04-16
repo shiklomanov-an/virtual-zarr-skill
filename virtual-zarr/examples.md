@@ -19,7 +19,7 @@ pixi add virtualizarr icechunk xarray zarr obstore obspec-utils h5py netcdf4
 
 ### Python Requirements
 
-- Python 3.10 or higher
+- Python 3.12 or higher (required by icechunk 2.0)
 - Latest stable versions of all packages
 
 ### Import Common Libraries
@@ -1058,6 +1058,15 @@ session.commit("Initialized empty results array")
 print("   ✓ Empty array created: shape (1000, 100, 100)")
 
 # === Step 2: Define Worker Function ===
+print("\n2. Distributing computation across processes...")
+
+# In icechunk 2.0, create a separate fork for each worker
+# ForkSessions are picklable and based on anonymous snapshots
+session = repo.writable_session("main")
+
+num_workers = 4
+chunk_size = 250  # Each worker processes 250 time slices
+
 def process_chunk(fork_session_bytes, start_idx, end_idx):
     """
     Worker function that runs in separate process.
@@ -1084,22 +1093,16 @@ def process_chunk(fork_session_bytes, start_idx, end_idx):
     return pickle.dumps(fork_session)
 
 # === Step 3: Distribute Work ===
-print("\n2. Distributing computation across processes...")
-
-session = repo.writable_session("main")
-fork = session.fork()
-
-# Serialize fork for multiprocessing
 import pickle
-fork_bytes = pickle.dumps(fork)
 
-# Define work chunks
-num_workers = 4
-chunk_size = 250  # Each worker processes 250 time slices
-tasks = [
-    (fork_bytes, i * chunk_size, (i + 1) * chunk_size)
-    for i in range(num_workers)
-]
+# Create one fork per worker (each fork is independent)
+tasks = []
+for i in range(num_workers):
+    fork = session.fork()
+    fork_bytes = pickle.dumps(fork)
+    start = i * chunk_size
+    end = (i + 1) * chunk_size
+    tasks.append((fork_bytes, start, end))
 
 print(f"   Launching {num_workers} parallel workers...")
 print(f"   Each processing {chunk_size} time slices...")
@@ -1127,7 +1130,8 @@ parallel_time = time.perf_counter() - start_time
 # === Step 4: Merge Results ===
 print("\n3. Merging results from all workers...")
 
-session.merge(*completed_forks)
+for fork_result in completed_forks:
+    session.merge(fork_result)
 snapshot_id = session.commit("Parallel computation complete")
 
 print(f"   ✓ All forks merged successfully")
